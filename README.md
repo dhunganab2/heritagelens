@@ -1,6 +1,5 @@
 # Heritage Lens
 
-Cultural image dataset and analysis project for Nepalese heritage.
 
 ## Project Structure
 
@@ -10,7 +9,7 @@ heritagelens/                  ← PROJECT ROOT (git repo)
 ├── data/
 │   ├── raw/
 │   │   └── wikimedia/
-│   │       ├── images/         ← DOWNLOADED IMAGES GO HERE
+│   │       ├── images/        
 │   │       │   ├── Category:Pashupatinath_Temple/
 │   │       │   ├── Category:Swayambhunath/
 │   │       │   ├── Category:Buddhist_temples_in_Nepal/
