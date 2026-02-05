@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.so
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data (optional: uncomment if you don't want to track large images)
+# data/raw/wikimedia/images/
+# data/processed/
+
+# Outputs
+outputs/checkpoints/*.pt
+outputs/figures/*.png
+
+# OS
+.DS_Store
+Thumbs.db
