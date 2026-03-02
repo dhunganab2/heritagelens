@@ -1,5 +1,8 @@
 """
 PyTorch Dataset for Heritage Lens: loads images and captions from metadata.json.
+
+Supports images from multiple sources (Wikimedia, DANAM) with different
+directory layouts. Pass multiple image directories to cover both.
 """
 
 import json
@@ -11,17 +14,30 @@ from torch.utils.data import Dataset
 from PIL import Image
 
 
-def _find_image_path(images_dir: Path, image_id: str, category: str | None = None) -> Path | None:
-    """Resolve image path. If category given, use it; else search Category:* subdirs."""
-    if category:
-        path = images_dir / f"Category:{category}" / image_id
-        if path.exists():
-            return path
-    for subdir in images_dir.iterdir():
-        if subdir.is_dir() and subdir.name.startswith("Category:"):
-            path = subdir / image_id
+def _find_image_path(
+    images_dirs: list[Path],
+    image_id: str,
+    category: str | None = None,
+) -> Path | None:
+    """Resolve image path across multiple image directories.
+
+    Searches Category:* subdirs (Wikimedia) and all other subdirs (DANAM).
+    """
+    for images_dir in images_dirs:
+        if not images_dir.exists():
+            continue
+        if category:
+            path = images_dir / f"Category:{category}" / image_id
             if path.exists():
                 return path
+            path = images_dir / category / image_id
+            if path.exists():
+                return path
+        for subdir in images_dir.iterdir():
+            if subdir.is_dir():
+                path = subdir / image_id
+                if path.exists():
+                    return path
     return None
 
 
@@ -48,24 +64,24 @@ class HeritageDataset(Dataset):
     def __init__(
         self,
         json_path: str | Path,
-        images_dir: str | Path,
+        images_dir: str | Path | list[str | Path],
         transform=None,
     ):
         json_path = Path(json_path)
-        images_dir = Path(images_dir)
+        if isinstance(images_dir, (str, Path)):
+            self.images_dirs = [Path(images_dir)]
+        else:
+            self.images_dirs = [Path(d) for d in images_dir]
         with open(json_path, "r", encoding="utf-8") as f:
             self.metadata = json.load(f)
-        self.images_dir = images_dir
         self.transform = transform if transform is not None else default_transform()
-        # Resolve paths once; drop entries with missing images
         self.valid_entries = []
         for i, entry in enumerate(self.metadata):
             image_id = entry["image_id"]
             category = entry.get("category")
-            path = _find_image_path(images_dir, image_id, category)
+            path = _find_image_path(self.images_dirs, image_id, category)
             if path is not None:
                 self.valid_entries.append((i, path))
-            # else skip this entry
 
     def __len__(self) -> int:
         return len(self.valid_entries)

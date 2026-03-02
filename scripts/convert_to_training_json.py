@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-Convert manifest.csv to metadata.json for training.
-Generates cultural_label and 3 captions per image from page_title and category.
+Convert manifest.csv → metadata.json for training.
+
+Caption strategy (3 captions per image):
+  1. Real Wikimedia ImageDescription  (if available and good English)
+     OR  a template like "A Stupa in Nepal."
+  2. Architectural detail sentence     (template, based on cultural_label)
+  3. Cultural/historical context       (template, based on cultural_label)
 """
 
 import csv
@@ -11,11 +16,34 @@ from pathlib import Path
 from collections import Counter
 
 
+# Non-English archive/metadata keywords commonly found in Wikimedia descriptions
+_NON_ENGLISH_MARKERS = [
+    "Collectie", "Archief", "Bestanddeelnr", "Beschrijving", "Trefwoorden",
+    "Fotograaf", "Auteursrechthebbende", "Inventarisnummer", "Reportage",
+    "Beschreibung", "Quelle", "Urheber", "Genehmigung", "Lizenz",
+    "Auteur", "Licence", "Permission", "bekijk toegang", "Bestand", "Datum :",
+]
+
+
+def _is_good_english(text: str, min_len: int = 25) -> bool:
+    """Return True only if the description is usable English."""
+    if not text or len(text) < min_len:
+        return False
+    if text.startswith("http://") or text.startswith("https://"):
+        return False
+    non_ascii = sum(1 for c in text if ord(c) > 127)
+    if non_ascii / len(text) > 0.15:
+        return False
+    for marker in _NON_ENGLISH_MARKERS:
+        if marker in text:
+            return False
+    return True
+
+
 def map_cultural_label(category: str, page_title: str, filename: str) -> str:
-    """Map category and filename/page_title to a specific cultural label."""
+    """Map category + filename keywords to a specific cultural label."""
     text = (page_title + " " + filename).lower()
 
-    # Category-first for specific categories
     if category == "Swayambhunath":
         return "Stupa"
     if category == "Boudhanath":
@@ -29,7 +57,6 @@ def map_cultural_label(category: str, page_title: str, filename: str) -> str:
     if category == "Traditional_clothing_of_Nepal":
         return "Traditional Clothing"
 
-    # Keyword-based for Buddhist/Hindu temples
     if "stupa" in text or "boudha" in text:
         return "Stupa"
     if "pagoda" in text or "nyatapola" in text:
@@ -39,37 +66,41 @@ def map_cultural_label(category: str, page_title: str, filename: str) -> str:
     if category == "Hindu_temples_in_Nepal":
         return "Hindu Temple"
 
-    # Fallback
     return category.replace("_", " ").title()
 
 
-def clean_page_title(page_title: str) -> str:
-    """Extract descriptive text from page title (remove File: and extension)."""
-    title = page_title.replace("File:", "").strip()
-    title = re.sub(r"\.[a-zA-Z]{3,4}$", "", title)
-    return title
+def generate_captions(
+    page_title: str,
+    category: str,
+    cultural_label: str,
+    description: str = "",
+) -> list[str]:
+    """Return exactly 3 captions for one image.
 
+    Caption 1  — Real Wikimedia description (preferred) or template fallback.
+    Caption 2  — Architectural detail (template).
+    Caption 3  — Cultural/historical context (template).
+    """
+    captions: list[str] = []
 
-def generate_captions(page_title: str, category: str, cultural_label: str) -> list[str]:
-    """Generate exactly 3 captions: general, architectural, cultural."""
-    captions = []
-    clean_title = clean_page_title(page_title)
-
-    # Caption 1: General description (use page_title if descriptive)
-    if len(clean_title) > 25 and " " in clean_title:
-        cap1 = clean_title.rstrip(".") + "."
+    # --- Caption 1: real description or template ---
+    if _is_good_english(description):
+        # Ensure it ends with a period
+        cap1 = description.rstrip(".!?,") + "."
         captions.append(cap1)
     else:
         captions.append(f"A {cultural_label} in Nepal.")
 
-    # Caption 2: Architectural details
+    # --- Caption 2: architectural detail ---
     if "Stupa" in cultural_label:
         captions.append(
-            "A white dome stupa with traditional Buddhist architecture, often featuring the eyes of Buddha and prayer flags."
+            "A white dome stupa with traditional Buddhist architecture, "
+            "often featuring the eyes of Buddha and prayer flags."
         )
     elif "Pagoda" in cultural_label or "Temple" in cultural_label:
         captions.append(
-            f"A {cultural_label} with traditional Nepali architecture, tiered roofs, and intricate wood or stone carvings."
+            f"A {cultural_label} with traditional Nepali architecture, "
+            "tiered roofs, and intricate wood or stone carvings."
         )
     elif "Thangka" in cultural_label or "Tibetan" in cultural_label:
         captions.append(
@@ -82,19 +113,18 @@ def generate_captions(page_title: str, category: str, cultural_label: str) -> li
     else:
         captions.append(f"Traditional {cultural_label} architecture or craft in Nepal.")
 
-    # Caption 3: Cultural/historical context
+    # --- Caption 3: cultural / historical context ---
     if "Stupa" in cultural_label:
         captions.append(
-            "An ancient Buddhist monument significant to Nepali and Tibetan Buddhist tradition."
+            "An ancient Buddhist monument of deep significance to Nepali "
+            "and Tibetan Buddhist tradition."
         )
     elif "Temple" in cultural_label:
         captions.append(
             "A place of worship and cultural significance in Nepal's heritage landscape."
         )
     elif "Thangka" in cultural_label or "Tibetan" in cultural_label:
-        captions.append(
-            "Buddhist devotional art with deep religious and cultural meaning."
-        )
+        captions.append("Buddhist devotional art with deep religious and cultural meaning.")
     else:
         captions.append(
             "An example of Nepali cultural heritage and traditional craftsmanship."
@@ -108,10 +138,11 @@ def convert_manifest_to_json(
     images_dir: Path,
     output_path: Path,
 ) -> list[dict]:
-    """Convert manifest.csv to metadata.json. Skip rows where image is missing."""
-    data = []
-    skipped = []
+    """Read manifest.csv and write metadata.json. Skips rows with missing images."""
+    data: list[dict] = []
+    skipped: list[str] = []
     category_counts: Counter = Counter()
+    real_caption_count = 0
 
     with open(manifest_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -119,6 +150,7 @@ def convert_manifest_to_json(
             filename = row["filename"].strip('"')
             category = row["category"].strip()
             page_title = row.get("page_title", "").strip('"')
+            description = row.get("description", "").strip()
 
             category_dir = images_dir / f"Category:{category}"
             image_path = category_dir / filename
@@ -128,7 +160,10 @@ def convert_manifest_to_json(
                 continue
 
             cultural_label = map_cultural_label(category, page_title, filename)
-            captions = generate_captions(page_title, category, cultural_label)
+            captions = generate_captions(page_title, category, cultural_label, description)
+
+            if _is_good_english(description):
+                real_caption_count += 1
 
             entry = {
                 "image_id": filename,
@@ -146,12 +181,14 @@ def convert_manifest_to_json(
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-    print(f"Processed {len(data)} images, skipped {len(skipped)} (missing file).")
-    if skipped and len(skipped) <= 5:
-        print(f"Skipped: {skipped}")
-    elif skipped:
-        print(f"First 5 skipped: {skipped[:5]} ...")
+    total = len(data)
+    template_count = total - real_caption_count
+    print(f"\nDone. {total} images written, {len(skipped)} skipped (missing file).")
+    print(f"  Real Wikimedia captions : {real_caption_count} / {total} ({100*real_caption_count//max(total,1)}%)")
+    print(f"  Template fallback used  : {template_count} / {total}")
     print("Per-category counts:", dict(category_counts))
+    if skipped[:5]:
+        print("First skipped:", skipped[:5])
     return data
 
 
@@ -159,21 +196,9 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Convert manifest.csv to metadata.json")
-    parser.add_argument(
-        "--manifest",
-        default="data/raw/wikimedia/manifest.csv",
-        help="Path to manifest.csv",
-    )
-    parser.add_argument(
-        "--images-dir",
-        default="data/raw/wikimedia/images",
-        help="Directory containing Category:*/ subdirs",
-    )
-    parser.add_argument(
-        "--output",
-        default="data/processed/metadata.json",
-        help="Output JSON path",
-    )
+    parser.add_argument("--manifest", default="data/raw/wikimedia/manifest.csv")
+    parser.add_argument("--images-dir", default="data/raw/wikimedia/images")
+    parser.add_argument("--output", default="data/processed/metadata.json")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent.parent
@@ -185,9 +210,9 @@ def main():
         print(f"Manifest not found: {manifest_path}")
         return
 
-    print("Converting manifest to metadata.json...")
+    print("Converting manifest.csv → metadata.json ...")
     convert_manifest_to_json(manifest_path, images_dir, output_path)
-    print(f"Wrote {output_path}")
+    print(f"Wrote: {output_path}")
 
 
 if __name__ == "__main__":
