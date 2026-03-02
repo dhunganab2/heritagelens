@@ -1,347 +1,401 @@
+"""
+Wikimedia Commons scraper for Nepal heritage images.
+
+Key improvements over v1:
+  - Batch image-info API calls (50 titles per request) → 50x fewer API calls
+  - HTTP 429 rate-limit handling: sleep 60 s and retry instead of skipping
+  - Thumbnail downloads (iiurlwidth=800) → fast, small files suitable for 224×224 training
+  - Non-English description filtering (Dutch/German/French archive boilerplate)
+  - 12 heritage categories covering temples, stupas, Durbar Squares, Thangka, clothing
+"""
+
+import csv
+import html
+import random
+import re
+import time
+from datetime import datetime
+from pathlib import Path
 
 import requests
-import os
-import csv
-from pathlib import Path
-from datetime import datetime
-from time import sleep
-from PIL import Image
-from io import BytesIO
-import random
+
+
+SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+
+# How long to sleep (seconds) after a 429 response before retrying
+RATE_LIMIT_SLEEP = 15
+
+# Non-English archive keywords that appear in Wikimedia boilerplate descriptions
+_NON_ENGLISH_MARKERS = [
+    # Dutch
+    "Collectie", "Archief", "Bestanddeelnr", "Beschrijving", "Trefwoorden",
+    "Fotograaf", "Auteursrechthebbende", "Inventarisnummer", "Reportage",
+    "bekijk toegang",
+    # German
+    "Beschreibung", "Quelle", "Urheber", "Genehmigung", "Lizenz", "Stoffweste",
+    "Nerzbisam", "Verbrämung",
+    # French
+    "femme rana tharu", "sud ouest", "allant à la pêche",
+    # Generic boilerplate
+    "Bestand", "Datum :",
+]
+
+
+def _clean_description(raw: str) -> str:
+    """Strip HTML and extract English text from a Wikimedia ImageDescription."""
+    if not raw:
+        return ""
+    # Prefer the English <span lang="en"> if present
+    en = re.search(r'<span[^>]*\blang=["\']en["\'][^>]*>(.*?)</span>', raw,
+                   re.DOTALL | re.IGNORECASE)
+    text = en.group(1) if en else raw
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _is_good_english(text: str, min_len: int = 25) -> bool:
+    """Return True only if text is usable English of sufficient length."""
+    if not text or len(text) < min_len:
+        return False
+    if text.startswith(("http://", "https://")):
+        return False
+    non_ascii = sum(1 for c in text if ord(c) > 127)
+    if non_ascii / len(text) > 0.15:
+        return False
+    for marker in _NON_ENGLISH_MARKERS:
+        if marker in text:
+            return False
+    return True
+
+
+# ── All Nepal heritage categories to scrape ──────────────────────────────────
+#
+# Format: (wikimedia_category_name, cultural_label_hint, limit)
+#   cultural_label_hint is used only for directory naming; the converter script
+#   does the actual label mapping.
+#
+NEPAL_CATEGORIES = [
+    # ── Temples & Stupas ─────────────────────────────────────────────────────
+    ("Buddhist_temples_in_Nepal",               "Buddhist Temple",        150),
+    ("Hindu_temples_in_Nepal",                  "Hindu Temple",           150),
+    ("Pashupatinath",                           "Hindu Temple",           150),
+    ("Swayambhunath",                           "Stupa",                  150),
+    ("Boudhanath",                              "Stupa",                  150),
+    # ── Durbar Squares ───────────────────────────────────────────────────────
+    ("Durbar_Square_temples_(Kathmandu)",        "Newari Pagoda",          150),
+    ("Patan_Durbar_Square",                     "Newari Pagoda",          150),
+    ("Bhaktapur_Durbar_Square",                 "Newari Pagoda",          150),
+    ("Changu_Narayan_Temple",                   "Hindu Temple",           100),
+    # ── Buddhist Art & Paintings ─────────────────────────────────────────────
+    ("Thangka",                                 "Thangka Painting",       150),
+    ("Tibetan_Buddhist_art",                    "Tibetan Art",            100),
+    # ── People & Clothing ────────────────────────────────────────────────────
+    ("Traditional_clothing_of_Nepal",           "Traditional Clothing",   150),
+]
 
 
 class WikimediaImageScraper:
-    """Scraper for downloading images from Wikimedia Commons by category."""
-    
-    def __init__(self, output_dir="data/raw/wikimedia"):
+    """Scrape images + captions from Wikimedia Commons for Nepal heritage training."""
+
+    def __init__(self, output_dir: str = "data/raw/wikimedia"):
         self.output_dir = Path(output_dir)
         self.images_dir = self.output_dir / "images"
         self.manifest_path = self.output_dir / "manifest.csv"
         self.base_url = "https://commons.wikimedia.org/w/api.php"
-        
-        # Create a session to maintain cookies and connection pooling
+
         self.session = requests.Session()
-        
-        # Browser-like headers required by Wikimedia
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Referer': 'https://commons.wikimedia.org/',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'same-origin',
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Connection": "keep-alive",
+            "Referer": "https://commons.wikimedia.org/",
         }
-        
-        # API-specific headers (simpler for API calls)
         self.api_headers = {
-            'User-Agent': 'HeritageLensBot/1.0 (Cultural Heritage Research Project; contact via GitHub)',
+            "User-Agent": "HeritageLensBot/1.0 (NKU Senior Project; Nepal Heritage Captioning)",
         }
-        
-        # Create directories
+
         self.images_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Initialize manifest
         self._init_manifest()
-    
+
+    # ── Manifest ──────────────────────────────────────────────────────────────
+
     def _init_manifest(self):
-        """Initialize CSV manifest if it doesn't exist."""
         if not self.manifest_path.exists():
-            with open(self.manifest_path, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    'filename', 'category', 'wikimedia_url', 'page_title',
-                    'license', 'author', 'download_date', 'file_size',
-                    'width', 'height'
+            with open(self.manifest_path, "w", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerow([
+                    "filename", "category", "wikimedia_url", "page_title",
+                    "license", "author", "description",
+                    "download_date", "file_size", "width", "height",
                 ])
-    
-    def get_category_images(self, category_name, limit=500):
-        """
-        Get list of images from a Wikimedia Commons category.
-        
-        Args:
-            category_name: Category name (e.g., "Buddhist_temples_in_Nepal")
-            limit: Maximum number of images to retrieve
-        
-        Returns:
-            List of image titles
-        """
-        images = []
+
+    def _append_manifest(self, row: dict):
+        with open(self.manifest_path, "a", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow([
+                row.get("filename"),
+                row.get("category"),
+                row.get("wikimedia_url"),
+                row.get("page_title"),
+                row.get("license", "Unknown"),
+                row.get("author", "Unknown"),
+                row.get("description", ""),
+                row.get("download_date"),
+                row.get("file_size"),
+                row.get("width"),
+                row.get("height"),
+            ])
+
+    # ── Category member listing ───────────────────────────────────────────────
+
+    def get_category_files(self, category: str, limit: int) -> list[str]:
+        """Return up to `limit` file titles from a Wikimedia category."""
+        titles: list[str] = []
         cmcontinue = None
-        
-        print(f"\n📂 Fetching images from Category:{category_name}")
-        
-        while len(images) < limit:
+
+        while len(titles) < limit:
             params = {
                 "action": "query",
                 "list": "categorymembers",
-                "cmtitle": f"Category:{category_name}",
+                "cmtitle": f"Category:{category}",
                 "cmtype": "file",
-                "cmlimit": min(500, limit - len(images)),
-                "format": "json"
+                "cmlimit": min(500, limit - len(titles)),
+                "format": "json",
             }
-            
             if cmcontinue:
                 params["cmcontinue"] = cmcontinue
-            
+
             try:
-                response = self.session.get(self.base_url, params=params, headers=self.api_headers, timeout=10)
-                response.raise_for_status()
-                data = response.json()
-                
-                if "query" in data and "categorymembers" in data["query"]:
-                    batch = data["query"]["categorymembers"]
-                    images.extend(batch)
-                    print(f"   Retrieved {len(images)} images so far...")
-                
-                # Check for continuation
+                r = self.session.get(self.base_url, params=params,
+                                     headers=self.api_headers, timeout=15)
+                r.raise_for_status()
+                data = r.json()
+                batch = [m["title"] for m in data.get("query", {}).get("categorymembers", [])]
+                titles.extend(batch)
                 if "continue" not in data:
                     break
                 cmcontinue = data["continue"]["cmcontinue"]
-                
-                sleep(random.uniform(0.5, 1.0))  # Be respectful with rate limiting
-                
+                time.sleep(0.5)
             except Exception as e:
-                print(f"   ⚠️  Error fetching category: {e}")
+                print(f"   [list error] {e}")
                 break
-        
-        print(f"   ✅ Found {len(images)} total images")
-        return images
-    
-    def get_image_info(self, image_title):
+
+        # Filter to supported raster formats only
+        titles = [t for t in titles if Path(t).suffix.lower() in SUPPORTED_EXTENSIONS]
+        print(f"   {len(titles)} supported-format files found in Category:{category}")
+        return titles[:limit]
+
+    # ── Batch image-info API ──────────────────────────────────────────────────
+
+    def get_image_info_batch(self, titles: list[str]) -> dict[str, dict]:
+        """Fetch thumbnail URL + metadata for up to 50 titles in one API call.
+
+        Returns a dict keyed by title (e.g. "File:Foo.jpg") with info dicts.
         """
-        Get detailed information about an image.
-        
-        Args:
-            image_title: Full image title (e.g., "File:Temple.jpg")
-        
-        Returns:
-            Dictionary with image info (url, metadata, etc.)
-        """
+        results: dict[str, dict] = {}
         params = {
             "action": "query",
-            "titles": image_title,
+            "titles": "|".join(titles),
             "prop": "imageinfo",
-            "iiprop": "url|size|mime|extmetadata",
-            "format": "json"
+            "iiprop": "url|size|mime|extmetadata|thumburl",
+            "iiurlwidth": 800,
+            "iiextmetadatalanguage": "en",
+            "format": "json",
         }
-        
-        try:
-            response = self.session.get(self.base_url, params=params, headers=self.api_headers, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            
-            pages = data["query"]["pages"]
-            page_id = list(pages.keys())[0]
-            
-            if "imageinfo" in pages[page_id]:
-                info = pages[page_id]["imageinfo"][0]
-                return {
-                    "url": info.get("url"),
-                    "width": info.get("width"),
-                    "height": info.get("height"),
-                    "size": info.get("size"),
-                    "mime": info.get("mime"),
-                    "metadata": info.get("extmetadata", {})
-                }
-        except Exception as e:
-            print(f"   ⚠️  Error getting image info: {e}")
-        
-        return None
-    
-    def download_image(self, url, save_path, max_retries=3):
-        """
-        Download an image from URL with retry logic.
-        
-        Args:
-            url: Image URL
-            save_path: Path to save the image
-            max_retries: Maximum number of retry attempts
-        
-        Returns:
-            True if successful, False otherwise
-        """
+
+        for attempt in range(4):
+            try:
+                r = self.session.get(self.base_url, params=params,
+                                     headers=self.api_headers, timeout=20)
+                if r.status_code == 429:
+                    wait = RATE_LIMIT_SLEEP * (attempt + 1)
+                    print(f"   [API 429] sleeping {wait}s ...")
+                    time.sleep(wait)
+                    continue
+                r.raise_for_status()
+                data = r.json()
+                for page in data.get("query", {}).get("pages", {}).values():
+                    title = page.get("title", "")
+                    if "imageinfo" not in page:
+                        continue
+                    info = page["imageinfo"][0]
+                    meta = info.get("extmetadata", {})
+
+                    raw_desc = meta.get("ImageDescription", {}).get("value", "")
+                    desc = _clean_description(raw_desc)
+                    if not _is_good_english(desc):
+                        desc = ""
+
+                    results[title] = {
+                        "url": info.get("thumburl") or info.get("url"),
+                        "original_url": info.get("url"),
+                        "width": info.get("width"),
+                        "height": info.get("height"),
+                        "size": info.get("size"),
+                        "mime": info.get("mime", ""),
+                        "license": meta.get("LicenseShortName", {}).get("value", "Unknown"),
+                        "author": _clean_description(
+                            meta.get("Artist", {}).get("value", "")
+                        ),
+                        "description": desc,
+                    }
+                return results
+            except Exception as e:
+                print(f"   [batch API error attempt {attempt+1}] {e}")
+                time.sleep(5)
+
+        return results
+
+    # ── Image download ────────────────────────────────────────────────────────
+
+    def download_image(self, url: str, save_path: Path, max_retries: int = 4) -> bool:
+        """Download one image. On 429, sleeps and retries (does NOT skip)."""
         for attempt in range(max_retries):
             try:
-                # Add random delay between retries
                 if attempt > 0:
-                    wait_time = (2 ** attempt) + random.uniform(0, 1)
-                    sleep(wait_time)
-                    print(f"   🔄 Retry {attempt + 1}/{max_retries}...")
-                
-                # Use session with browser-like headers
-                response = self.session.get(
-                    url, 
-                    stream=True, 
-                    headers=self.headers, 
-                    timeout=30,
-                    allow_redirects=True
-                )
-                response.raise_for_status()
-                
-                # Save image
-                with open(save_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
+                    wait = min(2 ** attempt + random.uniform(0, 1), 30)
+                    time.sleep(wait)
+
+                r = self.session.get(url, stream=True, headers=self.headers,
+                                     timeout=60, allow_redirects=True)
+
+                if r.status_code == 429:
+                    wait = RATE_LIMIT_SLEEP * (attempt + 1)
+                    print(f"      [429] sleeping {wait}s ...")
+                    time.sleep(wait)
+                    continue
+
+                r.raise_for_status()
+
+                with open(save_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=16384):
                         if chunk:
                             f.write(chunk)
-                
                 return True
-                
+
             except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 403:
-                    if attempt < max_retries - 1:
-                        print(f"   ⚠️  403 Forbidden (attempt {attempt + 1}/{max_retries})")
-                        continue
-                    else:
-                        print(f"   ❌ 403 Forbidden - Skipping after {max_retries} attempts")
-                        return False
-                else:
-                    print(f"   ⚠️  HTTP Error {e.response.status_code}: {e}")
+                if e.response.status_code in (403, 404):
                     return False
+                print(f"      [HTTP {e.response.status_code}] {e}")
+                time.sleep(5)
             except requests.exceptions.Timeout:
-                if attempt < max_retries - 1:
-                    print(f"   ⚠️  Timeout (attempt {attempt + 1}/{max_retries})")
-                    continue
-                else:
-                    print(f"   ❌ Timeout - Skipping after {max_retries} attempts")
-                    return False
+                print(f"      [timeout attempt {attempt+1}]")
             except Exception as e:
-                print(f"   ⚠️  Download failed: {e}")
+                print(f"      [error] {e}")
                 return False
-        
+
+        print(f"      [FAILED after {max_retries} attempts] {save_path.name}")
         return False
-    
-    def add_to_manifest(self, image_data):
-        """Add image metadata to manifest CSV."""
-        with open(self.manifest_path, 'a', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                image_data.get('filename'),
-                image_data.get('category'),
-                image_data.get('wikimedia_url'),
-                image_data.get('page_title'),
-                image_data.get('license', 'Unknown'),
-                image_data.get('author', 'Unknown'),
-                image_data.get('download_date'),
-                image_data.get('file_size'),
-                image_data.get('width'),
-                image_data.get('height')
-            ])
-    
-    def scrape_category(self, category_name, limit=100):
-        """
-        Scrape all images from a category.
-        
-        Args:
-            category_name: Wikimedia Commons category name
-            limit: Maximum number of images to download
-        """
-        # Create category directory
-        category_dir = self.images_dir / f"Category:{category_name}"
-        category_dir.mkdir(exist_ok=True)
-        
-        # Get list of images
-        images = self.get_category_images(category_name, limit)
-        
-        print(f"\n⬇️  Downloading {len(images)} images to {category_dir}")
+
+    # ── Category scraper ──────────────────────────────────────────────────────
+
+    def scrape_category(self, category: str, limit: int):
+        """Scrape one Wikimedia Commons category."""
+        category_dir = self.images_dir / f"Category:{category}"
+        category_dir.mkdir(parents=True, exist_ok=True)
+
+        print(f"\n{'='*60}")
+        print(f"Category: {category}  (limit={limit})")
+
+        # Count already-downloaded to support resume
+        existing = {p.name for p in category_dir.iterdir() if p.is_file()}
+        print(f"  Already downloaded: {len(existing)}")
+
+        all_titles = self.get_category_files(category, limit)
+        if not all_titles:
+            print("  No files found.")
+            return
+
+        # Filter titles whose files we already have
+        pending = [t for t in all_titles
+                   if t.replace("File:", "").replace(" ", "_") not in existing]
+        print(f"  Pending download: {len(pending)}")
+
+        # Batch-fetch image info (50 at a time)
+        info_map: dict[str, dict] = {}
+        BATCH = 50
+        for i in range(0, len(pending), BATCH):
+            chunk = pending[i:i + BATCH]
+            print(f"  Fetching info batch {i//BATCH + 1}/{(len(pending)+BATCH-1)//BATCH} ...")
+            info_map.update(self.get_image_info_batch(chunk))
+            time.sleep(1.0)  # polite pause between info batches
+
         downloaded = 0
-        
-        for idx, image in enumerate(images[:limit], 1):
-            image_title = image['title']
-            
-            # Get image info
-            info = self.get_image_info(image_title)
-            if not info or not info.get('url'):
+        for idx, title in enumerate(pending, 1):
+            info = info_map.get(title)
+            if not info or not info.get("url"):
+                print(f"  [{idx}/{len(pending)}] No info — skip: {title[:60]}")
                 continue
-            
-            # Generate filename
-            filename = image_title.replace('File:', '').replace(' ', '_')
+
+            filename = title.replace("File:", "").replace(" ", "_")
             save_path = category_dir / filename
-            
-            # Skip if already exists
+
             if save_path.exists():
-                print(f"   [{idx}/{len(images)}] ⏭️  Skipped (exists): {filename}")
+                print(f"  [{idx}/{len(pending)}] Already exists: {filename[:60]}")
                 continue
-            
-            # Download image
-            print(f"   [{idx}/{len(images)}] 📥 Downloading: {filename}")
-            
-            # Add small random delay to avoid rate limiting
-            sleep(random.uniform(0.5, 1.5))
-            
-            if self.download_image(info['url'], save_path):
-                # Extract metadata
-                metadata = info.get('metadata', {})
-                license_info = metadata.get('LicenseShortName', {}).get('value', 'Unknown')
-                author = metadata.get('Artist', {}).get('value', 'Unknown')
-                
-                # Add to manifest
-                self.add_to_manifest({
-                    'filename': filename,
-                    'category': category_name,
-                    'wikimedia_url': info['url'],
-                    'page_title': image_title,
-                    'license': license_info,
-                    'author': author,
-                    'download_date': datetime.now().isoformat(),
-                    'file_size': info.get('size'),
-                    'width': info.get('width'),
-                    'height': info.get('height')
+
+            desc_preview = f' | "{info["description"][:60]}"' if info["description"] else ""
+            print(f"  [{idx}/{len(pending)}] {filename[:55]}{desc_preview}")
+
+            # Polite delay between downloads: 1–2 s
+            time.sleep(random.uniform(1.0, 2.0))
+
+            if self.download_image(info["url"], save_path):
+                self._append_manifest({
+                    "filename": filename,
+                    "category": category,
+                    "wikimedia_url": info.get("original_url") or info["url"],
+                    "page_title": title,
+                    "license": info.get("license", "Unknown"),
+                    "author": info.get("author", "Unknown"),
+                    "description": info.get("description", ""),
+                    "download_date": datetime.now().isoformat(),
+                    "file_size": info.get("size"),
+                    "width": info.get("width"),
+                    "height": info.get("height"),
                 })
-                
                 downloaded += 1
-        
-        print(f"\n✅ Downloaded {downloaded} images from {category_name}")
-    
-    def scrape_nepal_cultural_images(self):
-        """Scrape all Nepal cultural image categories."""
-        categories = {
-            "Temple Architecture": [
-                "Buddhist_temples_in_Nepal",
-                "Hindu_temples_in_Nepal",
-                "Pashupatinath_Temple",
-                "Swayambhunath",
-                "Boudhanath"
-            ],
-            "Thangka Paintings": [
-                "Thangka",
-                "Tibetan_Buddhist_art"
-            ],
-            "Traditional Ornaments": [
-                "Jewelry_of_Nepal",
-                "Traditional_clothing_of_Nepal"
-            ]
-        }
-        
-        print("\n" + "="*60)
-        print("🏛️  NEPAL CULTURAL HERITAGE IMAGE SCRAPER")
-        print("="*60)
-        
-        for theme, cats in categories.items():
-            print(f"\n\n🎨 Theme: {theme}")
-            print("-" * 60)
-            for category in cats:
-                try:
-                    self.scrape_category(category, limit=100)
-                except Exception as e:
-                    print(f"❌ Error scraping {category}: {e}")
-                    continue
-        
-        print("\n" + "="*60)
-        print("✅ SCRAPING COMPLETE!")
-        print(f"📊 Manifest saved to: {self.manifest_path}")
-        print("="*60)
+
+        total_now = len(existing) + downloaded
+        print(f"\n  Finished {category}: +{downloaded} new  ({total_now} total in dir)")
+
+    # ── Main entry ────────────────────────────────────────────────────────────
+
+    def scrape_all(self):
+        print("\n" + "=" * 60)
+        print("NEPAL CULTURAL HERITAGE IMAGE SCRAPER")
+        print(f"Target categories: {len(NEPAL_CATEGORIES)}")
+        print("=" * 60)
+
+        for category, _, limit in NEPAL_CATEGORIES:
+            try:
+                self.scrape_category(category, limit)
+            except KeyboardInterrupt:
+                print("\nInterrupted — partial data saved to manifest.csv")
+                break
+            except Exception as e:
+                print(f"\n[ERROR] Category {category}: {e}")
+                continue
+
+        total = sum(
+            len(list(d.iterdir()))
+            for d in self.images_dir.iterdir()
+            if d.is_dir()
+        )
+        print("\n" + "=" * 60)
+        print("SCRAPING COMPLETE")
+        print(f"Total images on disk : {total}")
+        print(f"Manifest             : {self.manifest_path}")
+        print("=" * 60)
 
 
 def main():
-    """Main execution function."""
-    # Initialize scraper
     scraper = WikimediaImageScraper(output_dir="data/raw/wikimedia")
-    
-    # Scrape all categories
-    scraper.scrape_nepal_cultural_images()
+    scraper.scrape_all()
 
 
 if __name__ == "__main__":

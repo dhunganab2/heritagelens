@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.so
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Raw images are too large for GitHub (~1.1 GB total)
+# Re-generate with: python scripts/download_wikimedia.py && python scripts/download_danam.py
+data/raw/wikimedia/images/
+data/raw/danam/images/
+data/raw/danam/.cache/
+
+# Keep manifests and processed JSONs in git (small, important)
+!data/raw/wikimedia/manifest.csv
+!data/raw/danam/manifest.csv
+!data/processed/
+
+# Outputs
+outputs/checkpoints/*.pt
+outputs/figures/*.png
+
+# OS
+.DS_Store
+Thumbs.db
