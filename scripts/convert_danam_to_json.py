@@ -2,10 +2,29 @@
 """
 Convert DANAM manifest.csv → metadata_danam.json for training.
 
-Caption strategy (3 captions per image):
-  1. Cleaned image caption from DANAM (describes what's in the photo)
-  2. Monument name + description sentence (provides context)
-  3. Architectural/cultural template based on monument type keywords
+Caption strategy — 3 captions per image:
+
+  Cap 1  — Expanded DANAM image_caption
+             DANAM captions are structured like:
+               "Nārāyaṇa Mandira, toraṇa with struts, view from W"
+               "view from W"
+               "Bhīmasena Mandira, buffalo skulls above the door, view from E"
+             We expand compass directions to words and restructure into a
+             natural sentence, so every image gets a unique visual description:
+               → "Toraṇa with struts at Nārāyaṇa Mandira, western view."
+               → "Western view of Jogeśvara Mandira."
+               → "Buffalo skulls above the door at Bhīmasena Mandira, eastern view."
+
+  Cap 2  — First sentence of monument_description
+             This is academic but monument-specific; it is shared by 2–3 images
+             of the same monument and never generated from a template.
+             Example: "The Nārāyaṇa temple at Dhālāchẽ Ṭola, Lalitpur, was
+             originally constructed in the medieval period in the multi-tiered
+             pagoda style."
+
+  Cap 3  — Monument-type architectural sentence
+             Based on detected monument type, specific enough to teach the model
+             correct vocabulary (torana, struts, harmika, etc.)
 """
 
 import csv
@@ -14,29 +33,167 @@ import re
 from collections import Counter
 from pathlib import Path
 
+# ── Compass direction expansion ───────────────────────────────────────────────
+_COMPASS = {
+    "N": "northern", "S": "southern", "E": "eastern", "W": "western",
+    "NE": "northeastern", "NW": "northwestern",
+    "SE": "southeastern", "SW": "southwestern",
+    "NNE": "north-northeastern", "NNW": "north-northwestern",
+    "SSE": "south-southeastern", "SSW": "south-southwestern",
+    "ENE": "east-northeastern", "WNW": "west-northwestern",
+    "ESE": "east-southeastern", "WSW": "west-southwestern",
+}
 
-# ── Monument type detection from name / description keywords ──────────────────
+# Regex for a compass suffix: ", view from W" / ", views from NW" / "from N"
+_COMPASS_RE = re.compile(
+    r",?\s*(?:views?\s+)?from\s+([NSEW]{1,3})\b.*$",
+    re.IGNORECASE,
+)
 
+# Phrases that add no visual information
+_FILLER_PHRASES = {
+    "view", "lower view", "close view", "full view", "aerial view",
+    "detail view", "close-up view", "historical image", "top-down view",
+}
+
+
+def _expand_caption(image_caption: str, monument_name: str) -> str:
+    """
+    Turn a structured DANAM caption into a natural English sentence.
+
+    Examples
+    --------
+    "Nārāyaṇa Mandira, toraṇa with struts, view from W"
+        → "Toraṇa with struts at Nārāyaṇa Mandira, western view."
+
+    "Kṛṣṇa Mandira, upper part with pinnacle, view from E"
+        → "Upper part with pinnacle at Kṛṣṇa Mandira, eastern view."
+
+    "view from W"
+        → "Western view of Jogeśvara Mandira."
+
+    "Bhīmasena Mandira, buffalo skulls above the door, view form E"
+        → "Buffalo skulls above the door at Bhīmasena Mandira, eastern view."
+
+    "Thãhiti Caitya, aerial view, from S"
+        → "Southern aerial view of Thãhiti Caitya."
+
+    "Gaddi Baithak, views from W before and after restoration"
+        → "Views of Gaddi Baithak from the west before and after restoration."
+    """
+    cap = image_caption.strip().rstrip(".")
+
+    # Extract compass direction
+    m = _COMPASS_RE.search(cap)
+    direction_str = ""
+    if m:
+        dir_key = m.group(1).upper()
+        direction_str = _COMPASS.get(dir_key, dir_key.lower())
+        cap = cap[: m.start()].strip(" ,")
+
+    # Strip monument_name prefix from the caption.
+    # DANAM captions look like: "MonumentName, detail text, view from X"
+    # The monument name may include parentheticals like "(before 608 CE)" that
+    # are NOT in the caption prefix, so we match only the base name part.
+    base_name = re.split(r"\s*[\(\[,]", monument_name)[0].strip()
+    if base_name and cap.lower().startswith(base_name.lower()):
+        cap = cap[len(base_name):].lstrip(" ,").strip()
+
+    # Check if what's left is a filler phrase or empty
+    cap_lower = cap.lower().strip()
+    is_filler = not cap_lower or cap_lower in _FILLER_PHRASES
+
+    safe_monument = monument_name.rstrip(".").strip()
+
+    if is_filler:
+        if direction_str:
+            return f"{direction_str.capitalize()} view of {safe_monument}."
+        return f"{safe_monument}."
+
+    # Compose: detail + monument + direction
+    detail = cap.rstrip(" ,").rstrip(".!?,")
+    detail_cap = detail[:1].upper() + detail[1:] if detail else detail
+
+    if direction_str:
+        return f"{detail_cap} at {safe_monument}, {direction_str} view."
+    return f"{detail_cap} at {safe_monument}."
+
+
+# ── Monument type detection ───────────────────────────────────────────────────
 _TYPE_PATTERNS = [
-    (r"\bstupa\b|\bcaitya\b|\bchaity[ae]\b", "Stupa"),
+    (r"\bcaitya\b|\bchaity[ae]\b|\bchorten\b", "Stupa"),
+    (r"\bstupa\b", "Stupa"),
     (r"\bbāhāḥ\b|\bbaha[hḥ]?\b|\bvihar[a]?\b|\bvihāra\b|\bmonastery\b", "Buddhist Monastery"),
     (r"\bpagoda\b", "Newari Pagoda"),
-    (r"\btemple\b|\bmandir[a]?\b|\bdev[aā]l[a]?\b", "Temple"),
-    (r"\bshrine\b|\bpīṭh[a]?\b", "Shrine"),
-    (r"\bfountain\b|\bhiti\b|\bdhārā\b|\bspout\b", "Water Fountain"),
+    (r"\bfountain\b|\bhiti\b|\bdhārā\b|\bspout\b|\bdhunge dhāra\b", "Water Fountain"),
     (r"\bpalace\b|\bdarbār\b|\bdurbar\b", "Palace"),
-    (r"\bstatue\b|\bsculpture\b|\bimage\b|\bmūrti\b", "Sculpture"),
-    (r"\binscription\b|\babhilekh\b", "Inscription"),
-    (r"\bgate\b|\bdhok[āa]\b|\bentrance\b", "Gate"),
+    (r"\bpillar\b|\bstambh[a]?\b|\bcolumn\b|\bpole\b", "Pillar"),
     (r"\bpond\b|\bpokharī\b|\btank\b", "Sacred Pond"),
-    (r"\bpillar\b|\bstambh[a]?\b|\bcolumn\b", "Pillar"),
-    (r"\bbouddha\b|\bbuddhist\b|\bbuddha\b", "Buddhist Monument"),
-    (r"\bśiva\b|\bshiva\b|\bmahadeva\b|\bmaheśvara\b", "Hindu Temple"),
+    (r"\binscription\b|\babhilekh\b", "Inscription"),
+    (r"\bsataḥ\b|\bsattal\b|\bphalcā\b|\brest house\b", "Rest House"),
+    (r"\bmandir[a]?\b|\btemple\b|\bdev[aā]l[a]?\b|\bshrine\b|\bpīṭh[a]?\b", "Temple"),
 ]
+
+# Cap 3 sentences per monument type — use domain vocabulary the model should learn
+_TYPE_CAP3: dict[str, str] = {
+    "Stupa": (
+        "A Buddhist stupa or caitya — a hemispherical votive monument with a"
+        " whitewashed dome, a square harmika, and a gilded spire — marking a"
+        " sacred site in the Kathmandu Valley."
+    ),
+    "Buddhist Monastery": (
+        "A traditional Nepali Buddhist monastery (bāhāḥ or bahī) built around a"
+        " central courtyard with a main shrine, votive caityas, and intricate"
+        " woodcarvings on windows and doorways."
+    ),
+    "Newari Pagoda": (
+        "A Newari pagoda temple with two or three tiered roofs of fired clay"
+        " tiles, carved wooden struts depicting deities, and an ornate toraṇa"
+        " above the main entrance."
+    ),
+    "Temple": (
+        "A traditional Hindu or Buddhist temple in Nepal with tiered roofs,"
+        " carved wooden struts, and a gilded toraṇa or metal finial marking the"
+        " sanctum."
+    ),
+    "Water Fountain": (
+        "A traditional Newari stone water fountain (hiti or dhunge dhārā) with"
+        " carved makara-head spouts fed by an ancient underground aquifer system,"
+        " historically the main water source for nearby residents."
+    ),
+    "Palace": (
+        "A historic palace or durbar complex built by the Malla or Shah kings,"
+        " featuring multi-storey brick facades, carved wooden windows, and an"
+        " ornate entrance courtyard."
+    ),
+    "Pillar": (
+        "A stone or metal pillar erected in front of a temple, often bearing an"
+        " inscription or a votive image of the deity to whom the adjacent shrine"
+        " is dedicated."
+    ),
+    "Rest House": (
+        "A traditional Newari phalcā (rest house or sattal) — an open pavilion"
+        " with a tiered roof where travellers and residents could rest, often"
+        " located at a road junction or temple entrance."
+    ),
+    "Sacred Pond": (
+        "A sacred rectangular pond (pokharī) in the Kathmandu Valley, used for"
+        " ritual bathing and water supply, often surrounded by shrines and"
+        " bordered by stone ghāṭas."
+    ),
+    "Inscription": (
+        "A stone inscription recording the foundation, renovation, or endowment"
+        " of a monument, providing a rare primary historical source for the dating"
+        " of Nepali heritage sites."
+    ),
+}
+_TYPE_CAP3_FALLBACK = (
+    "A historic heritage monument in the Kathmandu Valley representing Nepali"
+    " architectural and cultural traditions spanning the medieval Malla period."
+)
 
 
 def _detect_type(name: str, description: str) -> str:
-    """Infer a cultural-label from monument name and description keywords."""
     combined = f"{name} {description}".lower()
     for pattern, label in _TYPE_PATTERNS:
         if re.search(pattern, combined, re.IGNORECASE):
@@ -44,75 +201,41 @@ def _detect_type(name: str, description: str) -> str:
     return "Heritage Monument"
 
 
-def _first_sentence(text: str, max_len: int = 200) -> str:
-    """Return the first sentence of a text, capped at max_len chars."""
+def _first_sentence(text: str, max_len: int = 220) -> str:
+    """Return the first complete sentence of text, capped at max_len chars."""
     if not text:
         return ""
-    match = re.match(r"([^.!?]+[.!?])", text)
-    sentence = match.group(1).strip() if match else text.strip()
+    # Match up to the first sentence-ending punctuation
+    m = re.match(r"([^.!?]+[.!?])", text.strip())
+    sentence = m.group(1).strip() if m else text.strip()
     if len(sentence) > max_len:
         sentence = sentence[:max_len].rsplit(" ", 1)[0] + "."
     return sentence
 
 
-def generate_danam_captions(
+def _build_captions(
     image_caption: str,
     monument_name: str,
     description: str,
     cultural_label: str,
 ) -> list[str]:
-    """Return up to 3 captions for one DANAM image."""
-    captions: list[str] = []
+    # Cap 1: expanded visual description
+    cap1 = _expand_caption(image_caption, monument_name)
 
-    if image_caption and len(image_caption) >= 10:
-        cap = image_caption.rstrip(".!?,") + "."
-        captions.append(cap)
+    # Cap 2: first sentence of monument description (academic, specific per monument)
+    first_sent = _first_sentence(description)
+    if first_sent and len(first_sent) >= 20:
+        cap2 = first_sent
     else:
-        captions.append(f"{monument_name}, a {cultural_label} in Nepal.")
+        cap2 = f"{monument_name} is a historic {cultural_label} in the Kathmandu Valley, Nepal."
 
-    short_desc = _first_sentence(description)
-    if short_desc and len(short_desc) >= 20:
-        captions.append(short_desc)
-    else:
-        captions.append(f"{monument_name} is a historic {cultural_label} in Nepal.")
+    # Cap 3: monument-type architectural sentence
+    cap3 = _TYPE_CAP3.get(cultural_label, _TYPE_CAP3_FALLBACK)
 
-    if "Stupa" in cultural_label or "Caitya" in cultural_label:
-        captions.append(
-            "A Buddhist stupa with traditional Nepali architecture "
-            "and religious significance."
-        )
-    elif "Monastery" in cultural_label or "Bāhāḥ" in cultural_label:
-        captions.append(
-            "A traditional Buddhist monastery complex in the Kathmandu Valley "
-            "with ornate woodcarvings and courtyards."
-        )
-    elif "Temple" in cultural_label or "Pagoda" in cultural_label:
-        captions.append(
-            f"A {cultural_label} featuring traditional Nepali architecture "
-            "with tiered roofs and intricate carvings."
-        )
-    elif "Fountain" in cultural_label:
-        captions.append(
-            "A traditional stone water spout, an important feature of "
-            "Nepali urban heritage and water supply systems."
-        )
-    elif "Palace" in cultural_label:
-        captions.append(
-            "A historic palace structure in Nepal reflecting the architectural "
-            "grandeur of the Malla or Rana era."
-        )
-    elif "Sculpture" in cultural_label or "Pillar" in cultural_label:
-        captions.append(
-            "An ancient stone sculpture or carving of religious and cultural "
-            "significance in Nepal."
-        )
-    else:
-        captions.append(
-            f"A historic {cultural_label} representing Nepali cultural heritage."
-        )
+    return [cap1, cap2, cap3]
 
-    return captions[:3]
 
+# ── Main conversion ───────────────────────────────────────────────────────────
 
 def convert_danam_manifest(
     manifest_path: Path,
@@ -120,58 +243,56 @@ def convert_danam_manifest(
     output_path: Path,
 ) -> list[dict]:
     """Read DANAM manifest.csv and produce metadata_danam.json."""
+    rows: list[dict] = []
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+
     data: list[dict] = []
     skipped: list[str] = []
     type_counts: Counter = Counter()
 
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for idx, row in enumerate(reader):
-            filename = row["filename"].strip()
-            monument_name = row["monument_name"].strip()
-            image_caption = row.get("image_caption", "").strip()
-            description = row.get("monument_description", "").strip()
-            monument_id = row.get("monument_id", "").strip()
+    for idx, row in enumerate(rows):
+        filename      = row["filename"].strip()
+        monument_name = row["monument_name"].strip()
+        image_caption = row.get("image_caption", "").strip()
+        description   = row.get("monument_description", "").strip()
 
-            image_path = None
-            for d in images_dir.iterdir():
-                if d.is_dir():
-                    candidate = d / filename
-                    if candidate.exists():
-                        image_path = candidate
-                        break
+        # Find image file under any sub-directory
+        image_path = None
+        for d in images_dir.iterdir():
+            if d.is_dir():
+                candidate = d / filename
+                if candidate.exists():
+                    image_path = candidate
+                    break
 
-            if image_path is None:
-                skipped.append(filename)
-                continue
+        if image_path is None:
+            skipped.append(filename)
+            continue
 
-            cultural_label = _detect_type(monument_name, description)
-            captions = generate_danam_captions(
-                image_caption, monument_name, description, cultural_label
-            )
+        cultural_label = _detect_type(monument_name, description)
+        captions = _build_captions(image_caption, monument_name, description, cultural_label)
 
-            parent_dir = image_path.parent.name
+        entry = {
+            "image_id":     filename,
+            "category":     image_path.parent.name,
+            "cultural_label": cultural_label,
+            "monument_name": monument_name,
+            "source":       "danam",
+            "captions":     captions,
+        }
+        data.append(entry)
+        type_counts[cultural_label] += 1
 
-            entry = {
-                "image_id": filename,
-                "category": parent_dir,
-                "cultural_label": cultural_label,
-                "monument_name": monument_name,
-                "source": "danam",
-                "captions": captions,
-            }
-            data.append(entry)
-            type_counts[cultural_label] += 1
-
-            if (idx + 1) % 100 == 0:
-                print(f"  Processed {idx + 1} rows...")
+        if (idx + 1) % 100 == 0:
+            print(f"  Processed {idx + 1} / {len(rows)} rows…")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
     print(f"\nDone. {len(data)} images written, {len(skipped)} skipped (missing file).")
-    print("Type distribution:", dict(type_counts))
+    print("Monument type distribution:", dict(type_counts))
     if skipped[:5]:
         print("First skipped:", skipped[:5])
     return data
@@ -181,23 +302,23 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Convert DANAM manifest.csv to metadata_danam.json"
+        description="Convert DANAM manifest.csv → metadata_danam.json"
     )
-    parser.add_argument("--manifest", default="data/raw/danam/manifest.csv")
+    parser.add_argument("--manifest",   default="data/raw/danam/manifest.csv")
     parser.add_argument("--images-dir", default="data/raw/danam/images")
-    parser.add_argument("--output", default="data/processed/metadata_danam.json")
+    parser.add_argument("--output",     default="data/processed/metadata_danam.json")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent.parent
     manifest_path = root / args.manifest
-    images_dir = root / args.images_dir
-    output_path = root / args.output
+    images_dir    = root / args.images_dir
+    output_path   = root / args.output
 
     if not manifest_path.exists():
         print(f"Manifest not found: {manifest_path}")
         return
 
-    print("Converting DANAM manifest.csv → metadata_danam.json ...")
+    print("Converting DANAM manifest.csv → metadata_danam.json …")
     convert_danam_manifest(manifest_path, images_dir, output_path)
     print(f"Wrote: {output_path}")
 
