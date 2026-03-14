@@ -17,11 +17,14 @@ env/
 # Jupyter
 .ipynb_checkpoints/
 
-# Raw images are too large for GitHub (~1.1 GB total)
-# Re-generate with: python scripts/download_wikimedia.py && python scripts/download_danam.py
+# Raw images and large files — too large for GitHub
+# Re-generate with: python scripts/download_danam.py --reset-processed
 data/raw/wikimedia/images/
 data/raw/danam/images/
 data/raw/danam/.cache/
+data/raw/danam/manifest_clean.csv
+heritagelens-data.zip
+data/processed/gallery.html
 
 # Keep manifests and processed JSONs in git (small, important)
 !data/raw/wikimedia/manifest.csv
