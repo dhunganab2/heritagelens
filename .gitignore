@@ -29,6 +29,8 @@ data/raw/wikimedia/images/
 data/raw/danam/images/
 data/raw/danam/.cache/
 data/raw/danam/manifest_clean.csv
+data/raw/danam/manifest_1ext3obj.csv
+data/raw/danam/*.log
 heritagelens-data.zip
 data/processed/gallery.html
 data/processed/captions_cache.json

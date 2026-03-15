@@ -388,8 +388,10 @@ def main():
                 if caption:
                     with cache_lock:
                         cache[filename] = caption
-                        with open(cache_path, "w", encoding="utf-8") as f:
+                        tmp = cache_path.with_suffix(".tmp")
+                        with open(tmp, "w", encoding="utf-8") as f:
                             json.dump(cache, f, indent=2, ensure_ascii=False)
+                        tmp.replace(cache_path)  # atomic rename
                     done += 1
                 else:
                     failed += 1

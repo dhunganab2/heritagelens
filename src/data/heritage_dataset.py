@@ -6,7 +6,7 @@ directory layouts. Pass multiple image directories to cover both.
 """
 
 import json
-import random
+import unicodedata
 from pathlib import Path
 
 import torch
@@ -23,19 +23,20 @@ def _find_image_path(
 
     Searches Category:* subdirs (Wikimedia) and all other subdirs (DANAM).
     """
+    image_id_nfc = unicodedata.normalize("NFC", image_id)
     for images_dir in images_dirs:
         if not images_dir.exists():
             continue
         if category:
-            path = images_dir / f"Category:{category}" / image_id
-            if path.exists():
-                return path
-            path = images_dir / category / image_id
-            if path.exists():
-                return path
+            for candidate in (
+                images_dir / f"Category:{category}" / image_id_nfc,
+                images_dir / category / image_id_nfc,
+            ):
+                if candidate.exists():
+                    return candidate
         for subdir in images_dir.iterdir():
             if subdir.is_dir():
-                path = subdir / image_id
+                path = subdir / image_id_nfc
                 if path.exists():
                     return path
     return None
@@ -58,7 +59,7 @@ def default_transform():
 class HeritageDataset(Dataset):
     """
     Dataset that loads images and captions from metadata.json.
-    Returns (image_tensor, caption_string). Caption is randomly chosen from the 3 per image.
+    Returns (image_tensor, caption_string). Always uses Cap 1 (Gemini caption).
     """
 
     def __init__(
@@ -90,7 +91,7 @@ class HeritageDataset(Dataset):
         meta_idx, image_path = self.valid_entries[idx]
         entry = self.metadata[meta_idx]
         captions = entry["captions"]
-        caption = random.choice(captions) if captions else ""
+        caption = captions[0] if captions else ""
 
         image = Image.open(image_path).convert("RGB")
         if self.transform:

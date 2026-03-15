@@ -30,15 +30,17 @@ def nfc(s: str) -> str:
     return unicodedata.normalize("NFC", s)
 
 
-def find_image(filename: str) -> Path | None:
-    fn_nfc = nfc(filename)
-    for d in IMAGES_DIR.iterdir():
-        if not d.is_dir():
+def build_image_lookup(images_dir: Path) -> dict[str, Path]:
+    """Build filename → path lookup once; avoids O(N*M) per-file scan."""
+    lookup: dict[str, Path] = {}
+    for subdir in images_dir.iterdir():
+        if not subdir.is_dir():
             continue
-        for candidate in [d / filename, d / fn_nfc]:
-            if candidate.exists():
-                return candidate
-    return None
+        for p in subdir.iterdir():
+            if p.is_file():
+                lookup[nfc(p.name)] = p
+                lookup[p.name] = p  # also store original for exact match
+    return lookup
 
 
 def main():
@@ -59,6 +61,9 @@ def main():
     filenames = list(dict.fromkeys(e["image_id"] for e in entries))
     print(f"Images   : {len(filenames)} unique filenames")
 
+    print("Building image lookup ...")
+    lookup = build_image_lookup(IMAGES_DIR)
+
     missing = []
     packed  = 0
 
@@ -68,7 +73,7 @@ def main():
         zf.write(meta_path, arcname="metadata_merged.json")
 
         for fn in tqdm.tqdm(filenames, desc="Images", unit="img"):
-            src = find_image(fn)
+            src = lookup.get(nfc(fn)) or lookup.get(fn)
             if src is None:
                 missing.append(fn)
                 continue
@@ -83,7 +88,9 @@ def main():
     print(f"  Output         : {out_path}")
 
     if missing:
-        print(f"\n  ⚠ Missing files (first 10): {missing[:10]}")
+        print(f"\n  Missing files ({len(missing)} total, first 10):")
+        for fn in missing[:10]:
+            print(f"    {fn}")
 
     print("\nUpload heritagelens-data.zip to Google Drive, then run Colab.")
 
