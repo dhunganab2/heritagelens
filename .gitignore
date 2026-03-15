@@ -17,6 +17,12 @@ env/
 # Jupyter
 .ipynb_checkpoints/
 
+# Secrets — never commit API keys
+.env
+.env.local
+*.key
+*_api_key*
+
 # Raw images and large files — too large for GitHub
 # Re-generate with: python scripts/download_danam.py --reset-processed
 data/raw/wikimedia/images/
@@ -25,6 +31,7 @@ data/raw/danam/.cache/
 data/raw/danam/manifest_clean.csv
 heritagelens-data.zip
 data/processed/gallery.html
+data/processed/captions_cache.json
 
 # Keep manifests and processed JSONs in git (small, important)
 !data/raw/wikimedia/manifest.csv
