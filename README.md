@@ -10,13 +10,15 @@ Built as a Senior Project at Northern Kentucky University (Spring 2026).
 
 ## Results
 
-| Model | BLEU-1 | BLEU-2 | BLEU-3 | BLEU-4 | METEOR |
-|---|---|---|---|---|---|
-| Zero-shot BLIP (baseline) | — | — | — | — | — |
-| **Fine-tuned BLIP (ours)** | — | — | — | **0.2003** | — |
+| Model | BLEU-1 | BLEU-2 | BLEU-3 | BLEU-4 | METEOR | CLIPScore |
+|---|---|---|---|---|---|---|
+| Zero-shot BLIP (baseline) | — | — | — | — | — | — |
+| **Fine-tuned BLIP (ours)** | **0.3288** | **0.1713** | **0.0917** | **0.0526** | **0.2679** | **32.93** |
 
-> Full metric table will be updated after final test-set evaluation (Milestone 3).
-> Best val loss: **1.7287** (epoch 11 of 17). BLEU-4 improved **~10× over initial ResNet50+GPT-2 baseline**.
+> Evaluated on 182 held-out test images (8% split, never seen during training).
+> References: Cap 1 (Gemini) only, monument names anonymized for fair scoring.
+> CLIPScore range ~20–35 — 32.93 indicates strong image↔caption semantic alignment.
+> Zero-shot baseline numbers to be added after Cell 7 evaluation.
 
 ---
 
@@ -44,11 +46,12 @@ Generated English Caption
 | Vision encoder | ViT-B/16 — all layers frozen during fine-tuning |
 | Text decoder | BERT-based — fully fine-tuned |
 | Optimizer | AdamW (lr = 2e-5, weight_decay = 0.01) |
-| Scheduler | Linear warmup (1 epoch) + CosineAnnealingLR |
-| Batch size | 16 |
-| Epochs | 17 (early stopping, patience = 6) |
+| Scheduler | Linear warmup (2 epochs) + CosineAnnealingLR |
+| Batch size | 32 (AMP float16) |
+| Epochs | 16 (early stopping at epoch 16, best checkpoint at epoch 10) |
+| Best val loss | 2.0033 |
 | GPU | Tesla T4 (Google Colab) |
-| Training time | ~1.7 hours |
+| Training time | ~1.75 hours |
 
 ---
 
@@ -59,7 +62,7 @@ All data sourced exclusively from **DANAM** (Digital Archive of Nepalese Arts an
 | Stat | Value |
 |---|---|
 | Total images | 2,285 |
-| Unique monuments | 818 |
+| Unique monuments | 811 |
 | Exterior images | ~1,000 |
 | Object / detail images | ~1,285 |
 | Captions per image | 1 (Cap 1: Gemini Vision — rich, culturally accurate) |
@@ -92,11 +95,11 @@ heritagelens/
 ├── scripts/
 │   ├── download_danam.py             ← scrape DANAM REST API (v3, multi-image)
 │   ├── filter_manifest.py            ← cap images per monument (max ext/obj)
-│   ├── generate_captions_gemini.py   ← NEW: Gemini Vision caption generation (resumable)
+│   ├── generate_captions_gemini.py   ← Gemini Vision caption generation (resumable)
 │   ├── build_zip.py                  ← pack metadata + images into Colab zip
-│   ├── convert_danam_to_json.py      ← legacy: template-based captions (kept for reference)
 │   ├── batch_preview.py              ← CLI caption quality review + statistics
-│   └── show_captions.py              ← generate HTML gallery of images + captions
+│   ├── show_captions.py              ← generate HTML gallery of images + captions
+│   └── legacy/                       ← archived scripts (template-based captions)
 │
 ├── reports/
 │   ├── Heritage_Lens_Milestone2.docx ← Milestone 2 written report
@@ -172,10 +175,10 @@ python3 scripts/build_zip.py
 | 2 | Install libraries, load `BlipProcessor` |
 | 3 | `HeritageDataset`, DataLoaders, augmentation |
 | 4 | Load BLIP, freeze ViT encoder, set optimizer + scheduler |
-| 5 | Training loop (30 epochs max, early stopping) |
-| 6 | Evaluate fine-tuned BLIP: BLEU-1/2/3/4 + METEOR |
-| 7 | Zero-shot BLIP baseline: same metrics, side-by-side table |
-| 8 | Qualitative comparison: 6-image grid GT / fine-tuned / zero-shot |
+| 5 | Training loop (20 epochs max, early stopping, BLEU every 3 epochs) |
+| 6 | Evaluate fine-tuned BLIP: BLEU-1/2/3/4 + METEOR + CLIPScore (held-out test set) |
+| 7 | Zero-shot BLIP baseline: same metrics, side-by-side comparison table |
+| 8 | Qualitative comparison: 4-image grid GT / fine-tuned / zero-shot |
 
 Expected training time: **~90–120 min** on T4.
 
@@ -183,25 +186,23 @@ Expected training time: **~90–120 min** on T4.
 
 ## Caption Examples
 
-| Image | Ground Truth (Cap 2) | Fine-tuned BLIP |
+| Image | Ground Truth (Gemini, anonymized) | Fine-tuned BLIP |
 |---|---|---|
-| Thāhiti Caitya exterior | "A Buddhist stūpa or caitya with a dome roof, southwestern view." | "a 1-storey shakta tiered temple with a hip roof, 12 wooden struts, daciahpa." |
-| Jogeśvara Mandira object | "A gilt copper toraṇa (tympanum) at Jogeśvara Mandira." | *(to be filled after retrain)* |
+| Buddhist stupa exterior | "this monument is a three-tiered Buddhist stupa with a gilt copper finial..." | "a nepali heritage monument with a large bell-shaped dome and a decorated spire..." |
+| Temple carved detail (object) | "this monument features an elaborately carved wooden toraṇa depicting..." | "a nepali heritage monument with intricate carved wooden decorations..." |
 
 ---
 
-## Evaluation Plan (Milestone 3)
+## Evaluation (Milestone 3)
 
-All models evaluated on the **same fixed test set** with the **same prompt format**:
+All models evaluated on the **same 182 held-out test images** with identical references (Cap 1, monument names anonymized).
 
-| Model | Type |
-|---|---|
-| Fine-tuned BLIP (ours) | Transfer learning, domain-specific |
-| Zero-shot BLIP | Same model, no fine-tuning |
-| GPT-4 Vision | Large general-purpose VLM |
-| Google Cloud Vision | Commercial API baseline |
+| Model | BLEU-4 | METEOR | CLIPScore | Notes |
+|---|---|---|---|---|
+| Zero-shot BLIP | — | — | — | Unconditional generation, no domain prefix |
+| **Fine-tuned BLIP (ours)** | **0.0526** | **0.2679** | **32.93** | Conditional prefix: "a nepali heritage monument" |
 
-**Cultural accuracy** scored via a 5-dimension rubric (monument type, architectural detail, religious context, cultural terminology, period/provenance) — mean ± std over test images.
+**Key finding:** CLIPScore of 32.93 (near top of 20–35 range) indicates strong image↔caption semantic alignment despite low BLEU-4, which is expected when comparing against a single long Gemini reference caption. The model correctly describes architectural features, materials, and religious iconography but generates captions in a narrow stylistic range — a known limitation of small-dataset (2,285 image) fine-tuning.
 
 ---
 
