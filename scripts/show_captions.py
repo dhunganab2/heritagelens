@@ -36,7 +36,8 @@ def build_lookup():
         if not monument_dir.is_dir():
             continue
         for img_file in monument_dir.iterdir():
-            lookup[nfc(img_file.name)] = img_file
+            if img_file.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+                lookup[nfc(img_file.name)] = img_file
     return lookup
 
 
@@ -180,12 +181,15 @@ def build_html(entries: list[dict], lookup: dict) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Caption gallery viewer")
-    parser.add_argument("--n",    type=int, default=30)
-    parser.add_argument("--type", choices=["exterior", "object", "all"], default="all")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--n",        type=int, default=30)
+    parser.add_argument("--type",     choices=["exterior", "object", "all"], default="all")
+    parser.add_argument("--seed",     type=int, default=42)
+    parser.add_argument("--metadata", default=str(META_PATH),
+                        help="Path to metadata JSON (default: metadata_merged.json)")
     args = parser.parse_args()
 
-    with open(META_PATH) as f:
+    meta_path = Path(args.metadata)
+    with open(meta_path) as f:
         data = json.load(f)
 
     if args.type != "all":
@@ -198,7 +202,7 @@ def main():
 
     lookup = build_lookup()
 
-    print(f"Building gallery for {len(sample)} images...")
+    print(f"Building gallery for {len(sample)} images from {meta_path.name}...")
     html = build_html(sample, lookup)
 
     OUT_HTML.parent.mkdir(parents=True, exist_ok=True)
@@ -206,7 +210,8 @@ def main():
         f.write(html)
 
     print(f"Saved: {OUT_HTML}")
-    webbrowser.open(f"file://{OUT_HTML}")
+    abs_path = OUT_HTML.resolve()
+    webbrowser.open(f"file://{abs_path}")
     print("Opened in browser.")
 
 
