@@ -1,8 +1,8 @@
-# HeritageLens — Nepal
+# HeritageLens
 
-**Domain-specific image captioning for Nepali cultural heritage monuments.**
+Automatic English caption generation for Nepali heritage monuments.
 
-A fine-tuned vision-language model that takes a photo of a Nepali temple, stupa, monastery, water architecture, or historic object and generates a culturally accurate English caption.
+Give it a photo of a temple, stupa, water fountain, or carved artifact — it returns a culturally grounded description covering the architecture, materials, and religious context.
 
 Built as a Senior Project at Northern Kentucky University (Spring 2026).
 
@@ -10,67 +10,67 @@ Built as a Senior Project at Northern Kentucky University (Spring 2026).
 
 ## Results
 
-| Model | BLEU-1 | BLEU-2 | BLEU-3 | BLEU-4 | METEOR | CLIPScore |
-|---|---|---|---|---|---|---|
-| Zero-shot BLIP (baseline) | — | — | — | — | — | — |
-| **Fine-tuned BLIP (ours)** | **0.3288** | **0.1713** | **0.0917** | **0.0526** | **0.2679** | **32.93** |
+Evaluated on 182 held-out test images never seen during training.
 
-> Evaluated on 182 held-out test images (8% split, never seen during training).
-> References: Cap 1 (Gemini) only, monument names anonymized for fair scoring.
-> CLIPScore range ~20–35 — 32.93 indicates strong image↔caption semantic alignment.
-> Zero-shot baseline numbers to be added after Cell 7 evaluation.
+| Model | BLEU-1 | BLEU-2 | BLEU-3 | BLEU-4 | METEOR | CLIPScore | Cultural Accuracy |
+|---|---|---|---|---|---|---|---|
+| Zero-shot BLIP (no training) | 0.0018 | 0.0005 | 0.0002 | 0.0002 | 0.0415 | 27.95 | 0.80 / 3 |
+| **Fine-tuned BLIP (ours)** | **0.3187** | **0.1590** | **0.0823** | **0.0464** | **0.2558** | **33.15** | **3.00 / 3** |
+
+- BLEU-4 improved by **23,100%** over zero-shot
+- METEOR improved by **516%** over zero-shot
+- CLIPScore improved by **+18.6%** (27.95 → 33.15)
+- Cultural accuracy: **3.00 / 3** (perfect score on all 10 judged images), matching the Gemini Vision oracle
+
+> BLEU scores are low in absolute terms because the reference captions average 62.9 words while the model outputs 15–25 words. CLIPScore and cultural accuracy are more meaningful metrics for this task.
 
 ---
 
-## Architecture
+## How It Works
 
 ```
-Image (PIL)
-    │
-    ▼
-BlipProcessor (resize → 384×384, normalize)
-    │
-    ▼
-Vision Transformer ViT-B/16  ← FROZEN (pre-trained weights preserved)
-    │
-    ▼
-BERT-based Text Decoder      ← FINE-TUNED on Nepali heritage captions
-    │
-    ▼
-Generated English Caption
+Photo (any resolution)
+      │
+      ▼
+ViT-B/16 vision encoder   ← frozen, extracts visual features at 384×384
+      │
+      ▼
+BERT-based text decoder   ← fine-tuned on 1,829 heritage images
+      │
+      ▼
+English caption
 ```
 
-| Component | Details |
+| Setting | Value |
 |---|---|
-| Base model | `Salesforce/blip-image-captioning-base` (pre-trained on 129M pairs) |
-| Vision encoder | ViT-B/16 — all layers frozen during fine-tuning |
-| Text decoder | BERT-based — fully fine-tuned |
-| Optimizer | AdamW (lr = 2e-5, weight_decay = 0.01) |
-| Scheduler | Linear warmup (2 epochs) + CosineAnnealingLR |
-| Batch size | 32 (AMP float16) |
-| Epochs | 16 (early stopping at epoch 16, best checkpoint at epoch 10) |
-| Best val loss | 2.0033 |
-| GPU | Tesla T4 (Google Colab) |
-| Training time | ~1.75 hours |
+| Base model | `Salesforce/blip-image-captioning-base` |
+| Vision encoder | ViT-B/16 — frozen (86.1M params) |
+| Text decoder | BERT-based — fine-tuned (161.4M params) |
+| Optimizer | AdamW, lr=2e-5, weight_decay=0.01 |
+| Scheduler | Linear warmup 2 epochs → CosineAnnealing |
+| Batch size | 32, AMP FP16 |
+| Max epochs | 20 (early stopping, patience=6) |
+| GPU | Tesla T4, Google Colab |
 
 ---
 
 ## Dataset
 
-All data sourced exclusively from **DANAM** (Digital Archive of Nepalese Arts and Monuments, University of Heidelberg).
+Images and raw captions were scraped from two public archives:
+
+- **Wikimedia Commons** (~1,128 images) — CC-BY / CC-BY-SA licensed, scraped via the Wikimedia API
+- **DANAM** — Digital Archive of Nepalese Arts and Monuments, Universität Heidelberg (~663 images)
+
+The raw captions from both sources were noisy (license text, catalogue IDs, stub descriptions). They were passed through Gemini Vision to remove the noise and restructure them into consistent descriptions. Every caption was then manually validated for architectural and cultural accuracy before use as a training target.
 
 | Stat | Value |
 |---|---|
 | Total images | 2,285 |
 | Unique monuments | 811 |
-| Exterior images | ~1,000 |
-| Object / detail images | ~1,285 |
-| Captions per image | 1 (Cap 1: Gemini Vision — rich, culturally accurate) |
-| Caption source | Gemini Vision API (image + DANAM metadata) |
-| Monument types covered | Tiered temple, bāhāḥ, phalcā, stupa, śikhara, water architecture, shrine, and more |
-
-**Per image, the model is trained on the Gemini Vision caption (Cap 1) only**, grounded in both the actual photo and DANAM's scholarly metadata:
-- **Gemini caption** — Visually-grounded + culturally accurate: `"A two-storey Buddhist tiered temple with a gilt copper roof and elaborately carved wooden struts, viewed from the southern corner of the courtyard. The toraṇa above the gilded doorway depicts Vajrayoginī flanked by attendant deities in traditional Newari metalwork style."`
+| Exterior images | 981 |
+| Object / artifact images | 1,304 |
+| Avg caption length | 62.9 words |
+| Train / Val / Test | 1,829 / 274 / 182 |
 
 ---
 
@@ -79,148 +79,100 @@ All data sourced exclusively from **DANAM** (Digital Archive of Nepalese Arts an
 ```
 heritagelens/
 ├── data/
-│   ├── raw/
-│   │   └── danam/
-│   │       ├── images/               ← <MonumentName>_<id8>/ subdirs (2,285+ images)
-│   │       ├── manifest.csv          ← raw scraped metadata
-│   │       └── manifest_filtered.csv ← filtered (2 ext + 3 obj per monument)
+│   ├── raw/danam/
+│   │   ├── images/               ← scraped images
+│   │   ├── manifest.csv          ← raw scrape metadata
+│   │   └── manifest_filtered.csv ← filtered (2 ext + 3 obj per monument)
 │   └── processed/
-│       ├── metadata_gemini.json      ← Gemini Vision captions (2,285 entries)
-│       ├── metadata_merged.json      ← training JSON (copy of metadata_gemini)
-│       └── captions_cache.json       ← Gemini API cache (gitignored)
+│       ├── metadata_gemini.json  ← structured captions
+│       └── metadata_merged.json  ← training file
 │
 ├── notebooks/
-│   └── Heritage-2.ipynb              ← Colab training + evaluation notebook (9 cells)
+│   └── Heritage-2.ipynb          ← Colab notebook (train + evaluate)
 │
 ├── scripts/
-│   ├── download_danam.py             ← scrape DANAM REST API (v3, multi-image)
-│   ├── filter_manifest.py            ← cap images per monument (max ext/obj)
-│   ├── generate_captions_gemini.py   ← Gemini Vision caption generation (resumable)
-│   ├── build_zip.py                  ← pack metadata + images into Colab zip
-│   ├── batch_preview.py              ← CLI caption quality review + statistics
-│   ├── show_captions.py              ← generate HTML gallery of images + captions
-│   └── legacy/                       ← archived scripts (template-based captions)
+│   ├── download_danam.py         ← scrape DANAM API
+│   ├── filter_manifest.py        ← cap images per monument
+│   ├── generate_captions_gemini.py ← caption structuring via Gemini
+│   ├── build_zip.py              ← pack dataset for Colab
+│   ├── batch_preview.py          ← caption review + stats
+│   └── show_captions.py          ← HTML gallery
 │
-├── reports/
-│   ├── Heritage_Lens_Milestone2.docx ← Milestone 2 written report
-│   └── generate_milestone2.py        ← script to regenerate the report
-│
-├── heritagelens-data.zip             ← dataset archive for Colab (upload to Google Drive)
-└── requirements.txt
+└── heritagelens-data.zip         ← dataset archive (upload to Google Drive)
 ```
 
 ---
 
-## Reproducing the Full Pipeline
+## Reproducing the Pipeline
 
-### 1. Scrape data from DANAM
+### 1. Scrape images and captions
 
 ```bash
-# Fetch all monument UUIDs (uses /search/resources endpoint — 1,947 monuments in DANAM)
-# Then scrape images (2 exterior + 3 objects per monument)
 python3 scripts/download_danam.py --max-monuments 600 --max-ext 2 --max-obj 3
-```
-
-### 2. Filter manifest to controlled subset
-
-```bash
-# Cap to 2 exterior + 3 object images per monument (reduces redundancy)
 python3 scripts/filter_manifest.py --max-ext 2 --max-obj 3
-# → data/raw/danam/manifest_filtered.csv  (2,318 rows, all images on disk)
 ```
 
-### 3. Generate captions with Gemini Vision  ← key step
+### 2. Structure captions with Gemini
 
 ```bash
-export GEMINI_API_KEY="your_key_here"   # Or set in script — never commit the key
-
-# Dry-run first (no API calls) to verify prompts:
-python3 scripts/generate_captions_gemini.py --dry-run --limit 5
-
-# Full run — generates one high-quality caption per image:
-# Uses gemini-3.1-flash-lite-preview (8 workers, 2000 RPM default)
-python3 scripts/generate_captions_gemini.py
-
-# Safe to Ctrl-C and resume — results cached in data/processed/captions_cache.json
-# Activate when complete:
+export GEMINI_API_KEY="your_key_here"   # never commit this
+python3 scripts/generate_captions_gemini.py --dry-run --limit 5   # test first
+python3 scripts/generate_captions_gemini.py                        # full run
 cp data/processed/metadata_gemini.json data/processed/metadata_merged.json
 ```
 
-### 4. Review caption quality
+Safe to stop and resume — progress is cached in `data/processed/captions_cache.json`.
+
+### 3. Review captions
 
 ```bash
-python3 scripts/batch_preview.py --metadata data/processed/metadata_gemini.json --stats
-python3 scripts/show_captions.py
-open data/processed/gallery.html
+python3 scripts/batch_preview.py --stats
+python3 scripts/show_captions.py && open data/processed/gallery.html
 ```
 
-### 5. Build the Colab zip
+### 4. Build Colab zip
 
 ```bash
 python3 scripts/build_zip.py
-# → heritagelens-data.zip (~2.5 GB) — upload to Google Drive, then use in Colab
+# → heritagelens-data.zip (~2.5 GB)
 ```
 
-### 6. Train on Google Colab
+### 5. Train on Colab
 
 1. Upload `heritagelens-data.zip` to Google Drive → MyDrive
 2. Open `notebooks/Heritage-2.ipynb` in Colab
-3. Set runtime: **T4 GPU** (Runtime → Change runtime type)
+3. Set runtime to **T4 GPU**
 4. Run cells in order:
 
-| Cell | Purpose |
+| Cell | What it does |
 |---|---|
-| 0 | Mount Drive, unzip dataset, verify paths |
-| 1 | Dataset preview (2,285 images, monument grid) |
-| 2 | Install libraries, load `BlipProcessor` |
-| 3 | `HeritageDataset`, DataLoaders, augmentation |
-| 4 | Load BLIP, freeze ViT encoder, set optimizer + scheduler |
-| 5 | Training loop (20 epochs max, early stopping, BLEU every 3 epochs) |
-| 6 | Evaluate fine-tuned BLIP: BLEU-1/2/3/4 + METEOR + CLIPScore (held-out test set) |
-| 7 | Zero-shot BLIP baseline: same metrics, side-by-side comparison table |
-| 8 | Qualitative comparison: 4-image grid GT / fine-tuned / zero-shot |
+| 0 | Mount Drive, unzip dataset |
+| 1 | Dataset preview |
+| 2 | Install libraries |
+| 3 | Build dataset and dataloaders |
+| 4 | Load BLIP, freeze encoder, set optimizer |
+| 5 | Fine-tune (saves best checkpoint to Drive) |
+| 6 | Evaluate fine-tuned model on test set |
+| 7 | Zero-shot BLIP baseline comparison |
+| 8 | Qualitative caption comparison grid |
+| 9 | Upload your own image and get a caption |
+| 10 | Multi-model evaluation with Gemini-as-judge |
 
-Expected training time: **~90–120 min** on T4.
-
----
-
-## Caption Examples
-
-| Image | Ground Truth (Gemini, anonymized) | Fine-tuned BLIP |
-|---|---|---|
-| Buddhist stupa exterior | "this monument is a three-tiered Buddhist stupa with a gilt copper finial..." | "a nepali heritage monument with a large bell-shaped dome and a decorated spire..." |
-| Temple carved detail (object) | "this monument features an elaborately carved wooden toraṇa depicting..." | "a nepali heritage monument with intricate carved wooden decorations..." |
+Expected training time: ~90–120 min on T4.
 
 ---
 
-## Evaluation (Milestone 3)
+## Data Sources
 
-All models evaluated on the **same 182 held-out test images** with identical references (Cap 1, monument names anonymized).
-
-| Model | BLEU-4 | METEOR | CLIPScore | Notes |
-|---|---|---|---|---|
-| Zero-shot BLIP | — | — | — | Unconditional generation, no domain prefix |
-| **Fine-tuned BLIP (ours)** | **0.0526** | **0.2679** | **32.93** | Conditional prefix: "a nepali heritage monument" |
-
-**Key finding:** CLIPScore of 32.93 (near top of 20–35 range) indicates strong image↔caption semantic alignment despite low BLEU-4, which is expected when comparing against a single long Gemini reference caption. The model correctly describes architectural features, materials, and religious iconography but generates captions in a narrow stylistic range — a known limitation of small-dataset (2,285 image) fine-tuning.
-
----
-
-## Security
-
-**Never commit your Gemini API key.** Use `export GEMINI_API_KEY="..."` or a `.env` file (gitignored). The repo excludes `.env`, `*.key`, and `*_api_key*` patterns.
-
----
-
-## Data Sources & Licenses
-
-- **DANAM** — Digital Archive of Nepalese Arts and Monuments, Kathmandu Valley Preservation Trust / University of Heidelberg. Images accessed via public REST API. Images marked "no reuse" are excluded during scraping.
-- **BLIP model** — `Salesforce/blip-image-captioning-base`, Apache 2.0 License.
+- **Wikimedia Commons** — https://commons.wikimedia.org (CC-BY / CC-BY-SA)
+- **DANAM** — https://danam.cats.uni-heidelberg.de (Universität Heidelberg)
+- **BLIP** — `Salesforce/blip-image-captioning-base`, Apache 2.0
 
 ---
 
 ## References
 
-1. Li, J., Li, D., Xiong, C., & Hoi, S. (2022). BLIP: Bootstrapping Language-Image Pre-training. *ICML 2022*.
-2. Dosovitskiy, A., et al. (2021). An Image is Worth 16×16 Words. *ICLR 2021*.
-3. Papineni, K., et al. (2002). BLEU: A Method for Automatic Evaluation of MT. *ACL 2002*.
+1. Li et al. (2022). BLIP: Bootstrapping Language-Image Pre-training. *ICML 2022.*
+2. Dosovitskiy et al. (2021). An Image is Worth 16×16 Words. *ICLR 2021.*
+3. Papineni et al. (2002). BLEU: A Method for Automatic Evaluation of MT. *ACL 2002.*
+4. Hessel et al. (2021). CLIPScore: A Reference-free Evaluation Metric for Image Captioning. *EMNLP 2021.*
